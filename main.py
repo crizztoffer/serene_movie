@@ -39,12 +39,6 @@ async def stream_file(session_id: str, filename: str):
         "Access-Control-Allow-Origin": "*",
     })
 
-# REMOVE THIS BLOCK:
-# @app.options("/convert")
-# async def options_convert():
-#     # Reply to CORS preflight
-#     return JSONResponse(status_code=200, content={})
-
 @app.post("/convert")
 async def convert(request: Request):
     data = await request.json()
@@ -56,9 +50,19 @@ async def convert(request: Request):
     session_dir = os.path.join(TMP_BASE, session_id)
     os.makedirs(session_dir, exist_ok=True)
 
+    # Determine the ffmpeg executable path
+    ffmpeg_path = shutil.which("ffmpeg")
+    if not ffmpeg_path:
+        # Fallback if shutil.which doesn't find it for some reason (less likely with nixpacks)
+        # This path is based on your error message's indication of `/root/.nix-profile`
+        # You might need to confirm this path on your Railway container if issues persist.
+        ffmpeg_path = "/root/.nix-profile/bin/ffmpeg"
+        if not os.path.exists(ffmpeg_path):
+            raise RuntimeError("ffmpeg executable not found. Ensure it's installed and accessible.")
+
     # Build ffmpeg command to create HLS stream in temp folder
     ffmpeg_cmd = [
-        "ffmpeg",
+        ffmpeg_path,  # Use the determined full path to ffmpeg
         "-y",
         "-i", video_url,
         "-c:v", "libx264",
