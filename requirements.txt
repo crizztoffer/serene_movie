@@ -1,1 +1,4 @@
-NONE
+fastapi
+uvicorn
+ffmpeg-python
+python-multipart
