@@ -7,6 +7,7 @@ from fastapi import FastAPI, HTTPException, UploadFile, File
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
 
 # --- Initialize FastAPI ---
 app = FastAPI()
@@ -21,7 +22,7 @@ origins = [
 # 🟢 Ensure CORS middleware is added BEFORE mounting static files
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["https://serenekeks.com"],  # <-- your frontend origin
+    allow_origins=origins,  # <-- use origins list here for clarity
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -66,9 +67,14 @@ def convert_to_hls(input_path: str, output_dir: str):
 
     return output_m3u8
 
+# --- Pydantic model for JSON body ---
+class VideoRequest(BaseModel):
+    video_url: str
+
 # --- Endpoint: Convert Remote Video to HLS ---
 @app.post("/stream_file")
-async def stream_file(video_url: str):
+async def stream_file(request: VideoRequest):
+    video_url = request.video_url
     if not video_url:
         raise HTTPException(status_code=400, detail="No video URL provided.")
 
