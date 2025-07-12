@@ -1,78 +1,76 @@
-from flask import Flask, request, jsonify, make_response, send_from_directory, abort
+from flask import Flask, request, jsonify, send_from_directory, abort
+from flask_cors import CORS
 import subprocess
 import os
 import uuid
 
 app = Flask(__name__)
+CORS(app, origins=["https://serenekeks.com"])  # Restrict origin to your frontend domain
 
-FRONTEND_ORIGIN = "https://serenekeks.com"
-
-HLS_OUTPUT_DIR = "./hls_streams"
+# Directory to save HLS output segments/playlists
+HLS_OUTPUT_DIR = "hls_streams"
 os.makedirs(HLS_OUTPUT_DIR, exist_ok=True)
-
-def cors_response(response):
-    response.headers['Access-Control-Allow-Origin'] = FRONTEND_ORIGIN
-    response.headers['Access-Control-Allow-Methods'] = 'POST, OPTIONS'
-    response.headers['Access-Control-Allow-Headers'] = 'Content-Type'
-    response.headers['Access-Control-Allow-Credentials'] = 'true'
-    return response
 
 @app.route('/stream_file', methods=['POST', 'OPTIONS'])
 def stream_file():
     if request.method == 'OPTIONS':
-        # Reply to CORS preflight requests
-        response = make_response()
-        return cors_response(response)
+        # Preflight CORS response
+        return '', 204
 
     data = request.get_json()
     if not data or 'video_url' not in data:
-        response = jsonify({'error': 'Missing video_url in JSON'})
-        response.status_code = 400
-        return cors_response(response)
+        return jsonify({"error": "Missing 'video_url' in request body"}), 400
 
     video_url = data['video_url']
+    print(f"Received video_url to stream: {video_url}")
 
-    # Generate unique output folder for this stream
+    # Generate a unique ID for this stream session
     stream_id = str(uuid.uuid4())
-    output_folder = os.path.join(HLS_OUTPUT_DIR, stream_id)
-    os.makedirs(output_folder, exist_ok=True)
+    stream_dir = os.path.join(HLS_OUTPUT_DIR, stream_id)
+    os.makedirs(stream_dir, exist_ok=True)
 
-    playlist_path = os.path.join(output_folder, "playlist.m3u8")
+    # Output playlist filename
+    playlist_filename = "playlist.m3u8"
+    output_path = os.path.join(stream_dir, playlist_filename)
 
-    # ffmpeg command to convert remote video URL to HLS
+    # FFmpeg command to convert video URL to HLS segments/playlist
     ffmpeg_cmd = [
         "ffmpeg",
-        "-y",  # overwrite output files if exist
-        "-i", video_url,
-        "-c:v", "libx264",
-        "-c:a", "aac",
-        "-strict", "-2",  # for some AAC codec compliance
-        "-flags", "+cgop",
-        "-g", "30",
-        "-hls_time", "10",
-        "-hls_list_size", "0",
+        "-y",  # overwrite output
+        "-i", video_url,  # input video URL
+        "-codec:", "copy",  # copy codecs (no re-encoding for speed, remove if incompatible)
+        "-start_number", "0",
+        "-hls_time", "10",  # 10-second segments
+        "-hls_list_size", "0",  # include all segments in playlist
         "-f", "hls",
-        playlist_path
+        output_path
     ]
 
     try:
-        subprocess.run(ffmpeg_cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-    except subprocess.CalledProcessError as e:
-        response = jsonify({'error': 'Failed to generate HLS stream', 'details': e.stderr.decode()})
-        response.status_code = 500
-        return cors_response(response)
+        # Run ffmpeg and wait for it to complete
+        print("Running ffmpeg command...")
+        result = subprocess.run(ffmpeg_cmd, capture_output=True, text=True, timeout=60)
+        if result.returncode != 0:
+            print("FFmpeg error:", result.stderr)
+            return jsonify({"error": "FFmpeg failed to process video"}), 500
+    except subprocess.TimeoutExpired:
+        return jsonify({"error": "FFmpeg timed out"}), 500
 
-    playlist_url = f"/hls_streams/{stream_id}/playlist.m3u8"
+    # Return relative playlist URL for client to play
+    playlist_url = f"/hls_streams/{stream_id}/{playlist_filename}"
+    print(f"Streaming ready: {playlist_url}")
 
-    response = jsonify({'playlist_url': playlist_url})
-    return cors_response(response)
+    return jsonify({"playlist_url": playlist_url})
 
-@app.route('/hls_streams/<stream_id>/<filename>')
-def serve_hls(stream_id, filename):
-    dir_path = os.path.join(HLS_OUTPUT_DIR, stream_id)
-    if not os.path.isdir(dir_path):
+
+# Serve HLS stream files (playlist + ts segments)
+@app.route('/hls_streams/<stream_id>/<path:filename>')
+def serve_hls_files(stream_id, filename):
+    directory = os.path.join(HLS_OUTPUT_DIR, stream_id)
+    if not os.path.exists(os.path.join(directory, filename)):
         abort(404)
-    return send_from_directory(dir_path, filename)
+    return send_from_directory(directory, filename)
+
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=8000)
