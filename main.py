@@ -23,7 +23,7 @@ app = FastAPI(lifespan=lifespan)
 # Enable CORS for all origins (adjust in production)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=["*"], # For production, consider using specific origins like ["https://serenekeks.com"]
     allow_methods=["GET", "POST", "OPTIONS"],
     allow_headers=["*"],
 )
@@ -39,10 +39,11 @@ async def stream_file(session_id: str, filename: str):
         "Access-Control-Allow-Origin": "*",
     })
 
-@app.options("/convert")
-async def options_convert():
-    # Reply to CORS preflight
-    return JSONResponse(status_code=200, content={})
+# REMOVE THIS BLOCK:
+# @app.options("/convert")
+# async def options_convert():
+#     # Reply to CORS preflight
+#     return JSONResponse(status_code=200, content={})
 
 @app.post("/convert")
 async def convert(request: Request):
