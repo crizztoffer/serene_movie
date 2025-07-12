@@ -1,86 +1,85 @@
+from flask import Flask, request, jsonify, make_response, send_from_directory, abort
+import subprocess
 import os
 import uuid
-import shutil
-import subprocess
-from flask import Flask, request, jsonify, send_from_directory, abort
-import requests
 
 app = Flask(__name__)
 
-# Directory to store temporary files and HLS output
-TMP_DIR = "/tmp/video_stream"
-os.makedirs(TMP_DIR, exist_ok=True)
+FRONTEND_ORIGIN = "https://serenekeks.com"
 
-# Serve static files (the HLS segments and playlist)
-@app.route('/static/<path:filename>')
-def serve_static(filename):
-    return send_from_directory(TMP_DIR, filename)
+# Directory to save generated HLS streams
+HLS_OUTPUT_DIR = "./hls_streams"
+os.makedirs(HLS_OUTPUT_DIR, exist_ok=True)
 
-def convert_to_hls(input_path: str, output_dir: str):
-    """
-    Convert video to HLS format using system ffmpeg command.
-    """
-    os.makedirs(output_dir, exist_ok=True)
-    output_m3u8 = os.path.join(output_dir, "stream.m3u8")
-    segment_pattern = os.path.join(output_dir, "seg_%03d.ts")
+def cors_response(response):
+    response.headers['Access-Control-Allow-Origin'] = FRONTEND_ORIGIN
+    response.headers['Access-Control-Allow-Methods'] = 'POST, OPTIONS'
+    response.headers['Access-Control-Allow-Headers'] = 'Content-Type'
+    return response
 
-    # ffmpeg command line
-    cmd = [
+@app.route('/stream_file', methods=['POST', 'OPTIONS'])
+def stream_file():
+    if request.method == 'OPTIONS':
+        # Respond to preflight CORS request
+        response = make_response()
+        return cors_response(response)
+
+    data = request.get_json()
+    if not data or 'video_path' not in data:
+        response = jsonify({'error': 'Missing video_path in JSON'})
+        response.status_code = 400
+        return cors_response(response)
+
+    video_path = data['video_path']
+
+    # Verify the video path exists on server (for security, restrict paths as needed)
+    if not os.path.isfile(video_path):
+        response = jsonify({'error': 'Video file not found on server'})
+        response.status_code = 404
+        return cors_response(response)
+
+    # Create unique folder for HLS output
+    stream_id = str(uuid.uuid4())
+    output_folder = os.path.join(HLS_OUTPUT_DIR, stream_id)
+    os.makedirs(output_folder, exist_ok=True)
+
+    # Path for playlist output
+    playlist_path = os.path.join(output_folder, "playlist.m3u8")
+
+    # Build ffmpeg command to generate HLS (adjust as needed)
+    ffmpeg_cmd = [
         "ffmpeg",
-        "-i", input_path,
+        "-i", video_path,
         "-codec:", "copy",
         "-start_number", "0",
         "-hls_time", "10",
         "-hls_list_size", "0",
         "-f", "hls",
-        "-hls_segment_filename", segment_pattern,
-        output_m3u8,
-        "-y"
+        playlist_path
     ]
 
-    process = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-    if process.returncode != 0:
-        raise RuntimeError(f"FFmpeg failed: {process.stderr.decode()}")
-    return output_m3u8
-
-@app.route('/stream_file', methods=['POST'])
-def stream_file():
-    data = request.get_json()
-    if not data or "video_path" not in data:
-        return jsonify({"error": "Missing 'video_path' in request JSON"}), 400
-
-    video_path = data["video_path"]
-    file_id = str(uuid.uuid4())
-    output_dir = os.path.join(TMP_DIR, file_id + "_hls")
-
     try:
-        # Check if the input is a URL or local file path
-        if video_path.startswith("http://") or video_path.startswith("https://"):
-            # Download file temporarily
-            temp_file_path = os.path.join(TMP_DIR, f"{file_id}_input")
-            with requests.get(video_path, stream=True, timeout=30) as r:
-                r.raise_for_status()
-                with open(temp_file_path, 'wb') as f:
-                    shutil.copyfileobj(r.raw, f)
-            input_file = temp_file_path
-        else:
-            # Assume local file path, check if exists
-            if not os.path.isfile(video_path):
-                return jsonify({"error": "Local video file not found"}), 400
-            input_file = video_path
+        # Run ffmpeg process
+        subprocess.run(ffmpeg_cmd, check=True)
+    except subprocess.CalledProcessError as e:
+        response = jsonify({'error': 'Failed to generate HLS stream', 'details': str(e)})
+        response.status_code = 500
+        return cors_response(response)
 
-        # Convert to HLS
-        convert_to_hls(input_file, output_dir)
+    # Return playlist URL relative to this server
+    playlist_url = f"/hls_streams/{stream_id}/playlist.m3u8"
 
-        # Clean up downloaded file if any
-        if video_path.startswith("http://") or video_path.startswith("https://"):
-            os.remove(temp_file_path)
+    response = jsonify({'playlist_url': playlist_url})
+    return cors_response(response)
 
-        playlist_url = f"/static/{file_id}_hls/stream.m3u8"
-        return jsonify({"message": "Conversion successful", "playlist_url": playlist_url})
-
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
+@app.route('/hls_streams/<stream_id>/<filename>')
+def serve_hls(stream_id, filename):
+    # Serve generated HLS segments and playlists
+    dir_path = os.path.join(HLS_OUTPUT_DIR, stream_id)
+    if not os.path.isdir(dir_path):
+        abort(404)
+    return send_from_directory(dir_path, filename)
 
 if __name__ == '__main__':
+    # Run on all interfaces, port 8000 for example
     app.run(host='0.0.0.0', port=8000)
