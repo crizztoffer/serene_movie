@@ -9,24 +9,22 @@ from fastapi.middleware.cors import CORSMiddleware
 
 app = FastAPI()
 
-# Mount static files from /tmp so clients can access the .m3u8 and .ts files
 app.mount("/static", StaticFiles(directory="/tmp"), name="static")
 
 # --- CORS Configuration ---
-# Allow only your frontend domain that matches the Railway app domain exactly
 origins = [
-    "https://smov.serenekeks.com",
+    "https://serenekeks.com",        # Frontend domain where pick_video.php is located
+    "https://smov.serenekeks.com",   # Backend domain itself, optional
 ]
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=origins,       # List of allowed origins
-    allow_credentials=True,      # Allow cookies, authorization headers, etc.
-    allow_methods=["*"],         # Allow all HTTP methods
-    allow_headers=["*"],         # Allow all headers
+    allow_origins=origins,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 # --- End CORS Configuration ---
-
 
 def convert_to_hls(input_path: str, output_dir: str):
     os.makedirs(output_dir, exist_ok=True)
@@ -55,7 +53,6 @@ def convert_to_hls(input_path: str, output_dir: str):
         raise RuntimeError(f"HLS conversion failed: {e}")
 
     return output_m3u8
-
 
 @app.post("/stream_file")
 async def stream_file(video_url: str):
@@ -106,7 +103,6 @@ async def stream_file(video_url: str):
         "message": "Conversion successful",
         "playlist_url": f"/static/{file_id}_hls/stream.m3u8"
     }
-
 
 @app.post("/upload")
 async def upload_video(file: UploadFile = File(...)):
