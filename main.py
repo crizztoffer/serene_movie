@@ -2,19 +2,21 @@ import os
 import uuid
 import shutil
 import ffmpeg
-import httpx  # For making HTTP requests to download files
+import httpx
 from fastapi import FastAPI, HTTPException, UploadFile, File
+from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
 
 app = FastAPI()
 
-app.mount("/static", StaticFiles(directory="/tmp"), name="static")
-
-# --- CORS Configuration ---
+# CORS origins allowed to access the backend
 origins = [
-    "https://serenekeks.com",        # Frontend domain where pick_video.php is located
-    "https://smov.serenekeks.com",   # Backend domain itself, optional
+    "https://serenekeks.com",       # Your frontend domain
+    "https://smov.serenekeks.com",  # Your backend domain (if frontend uses this)
+    "http://localhost",
+    "http://localhost:8080",
 ]
 
 app.add_middleware(
@@ -24,7 +26,12 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-# --- End CORS Configuration ---
+
+# Mount static files for HLS streaming output
+app.mount("/static", StaticFiles(directory="/tmp"), name="static")
+
+class VideoUrl(BaseModel):
+    video_url: str
 
 def convert_to_hls(input_path: str, output_dir: str):
     os.makedirs(output_dir, exist_ok=True)
@@ -49,13 +56,14 @@ def convert_to_hls(input_path: str, output_dir: str):
         print(f"FFmpeg error: {e.stderr.decode()}")
         raise RuntimeError(f"FFmpeg conversion failed: {e.stderr.decode()}")
     except Exception as e:
-        print(f"An unexpected error occurred during HLS conversion: {e}")
+        print(f"Unexpected error during HLS conversion: {e}")
         raise RuntimeError(f"HLS conversion failed: {e}")
 
     return output_m3u8
 
 @app.post("/stream_file")
-async def stream_file(video_url: str):
+async def stream_file(data: VideoUrl):
+    video_url = data.video_url
     if not video_url:
         raise HTTPException(status_code=400, detail="No video URL provided.")
 
@@ -67,9 +75,6 @@ async def stream_file(video_url: str):
     temp_input_path = f"/tmp/{file_id}{file_extension}"
     output_dir = f"/tmp/{file_id}_hls"
 
-    print(f"Attempting to download video from: {video_url}")
-    print(f"Saving to temporary path: {temp_input_path}")
-
     try:
         async with httpx.AsyncClient(follow_redirects=True, timeout=30.0) as client:
             response = await client.get(video_url)
@@ -77,10 +82,8 @@ async def stream_file(video_url: str):
 
             with open(temp_input_path, "wb") as f:
                 f.write(response.content)
-        print("Video downloaded successfully.")
 
         convert_to_hls(temp_input_path, output_dir)
-        print("HLS conversion successful.")
 
     except httpx.HTTPStatusError as e:
         print(f"HTTP error downloading video: {e.response.status_code} - {e.response.text}")
@@ -92,12 +95,11 @@ async def stream_file(video_url: str):
         print(f"Runtime error during HLS conversion: {e}")
         raise HTTPException(status_code=500, detail=str(e))
     except Exception as e:
-        print(f"An unexpected error occurred: {e}")
-        raise HTTPException(status_code=500, detail=f"An unexpected error occurred: {e}")
+        print(f"Unexpected error: {e}")
+        raise HTTPException(status_code=500, detail=f"Unexpected error: {e}")
     finally:
         if os.path.exists(temp_input_path):
             os.remove(temp_input_path)
-            print(f"Cleaned up temporary downloaded file: {temp_input_path}")
 
     return {
         "message": "Conversion successful",
@@ -129,7 +131,7 @@ async def upload_video(file: UploadFile = File(...)):
             os.remove(input_path)
         if os.path.exists(output_dir):
             shutil.rmtree(output_dir)
-        raise HTTPException(status_code=500, detail=f"An unexpected error occurred: {e}")
+        raise HTTPException(status_code=500, detail=f"Unexpected error: {e}")
     finally:
         if os.path.exists(input_path):
             os.remove(input_path)
