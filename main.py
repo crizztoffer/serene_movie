@@ -1,14 +1,24 @@
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.responses import JSONResponse, FileResponse
 from fastapi.middleware.cors import CORSMiddleware
-from starlette.staticfiles import StaticFiles
 import uuid
 import os
 import subprocess
 import shutil
 import asyncio
+from contextlib import asynccontextmanager
 
-app = FastAPI()
+TMP_BASE = "/tmp/hls_streams"
+os.makedirs(TMP_BASE, exist_ok=True)
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # On startup
+    asyncio.create_task(cleanup_old_sessions())
+    yield
+    # On shutdown (if needed)
+
+app = FastAPI(lifespan=lifespan)
 
 # Enable CORS for all origins (adjust in production)
 app.add_middleware(
@@ -17,9 +27,6 @@ app.add_middleware(
     allow_methods=["GET", "POST", "OPTIONS"],
     allow_headers=["*"],
 )
-
-TMP_BASE = "/tmp/hls_streams"
-os.makedirs(TMP_BASE, exist_ok=True)
 
 # Serve static HLS files for each session id
 @app.get("/stream/{session_id}/{filename}")
@@ -88,7 +95,3 @@ async def cleanup_old_sessions():
                 except Exception as e:
                     print(f"Error cleaning folder {folder_path}: {e}")
         await asyncio.sleep(3600)  # Run cleanup every hour
-
-@app.on_event("startup")
-async def startup_event():
-    asyncio.create_task(cleanup_old_sessions())
