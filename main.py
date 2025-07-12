@@ -2,7 +2,7 @@ import os
 import uuid
 import shutil
 import ffmpeg
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, UploadFile, File # <--- CORRECTED IMPORT
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
@@ -89,7 +89,7 @@ async def stream_file(file_location: str):
 
 # You can keep your existing /upload endpoint if you still need file uploads
 @app.post("/upload")
-async def upload_video(file: UploadFile):
+async def upload_video(file: UploadFile = File(...)): # <--- UploadFile and File are now defined
     # Create unique temp file names
     file_id = str(uuid.uuid4())
     input_path = f"/tmp/{file_id}_{file.filename}"
