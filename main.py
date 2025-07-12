@@ -3,35 +3,25 @@ import uuid
 import shutil
 import ffmpeg
 import httpx
-from fastapi import FastAPI, HTTPException, UploadFile, File
+from fastapi import FastAPI, HTTPException, UploadFile, File, Request
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
 
 app = FastAPI()
 
-# CORS origins allowed to access the backend
-origins = [
-    "https://serenekeks.com",       # Your frontend domain
-    "https://smov.serenekeks.com",  # Your backend domain (if frontend uses this)
-    "http://localhost",
-    "http://localhost:8080",
-]
-
+# --- ✅ CORS CONFIGURATION ---
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=origins,
+    allow_origins=["https://serenekeks.com"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+# -----------------------------
 
-# Mount static files for HLS streaming output
+# Mount static folder so HLS output is accessible from the client
 app.mount("/static", StaticFiles(directory="/tmp"), name="static")
-
-class VideoUrl(BaseModel):
-    video_url: str
 
 def convert_to_hls(input_path: str, output_dir: str):
     os.makedirs(output_dir, exist_ok=True)
@@ -56,22 +46,20 @@ def convert_to_hls(input_path: str, output_dir: str):
         print(f"FFmpeg error: {e.stderr.decode()}")
         raise RuntimeError(f"FFmpeg conversion failed: {e.stderr.decode()}")
     except Exception as e:
-        print(f"Unexpected error during HLS conversion: {e}")
+        print(f"Unexpected error: {e}")
         raise RuntimeError(f"HLS conversion failed: {e}")
 
     return output_m3u8
 
 @app.post("/stream_file")
-async def stream_file(data: VideoUrl):
-    video_url = data.video_url
+async def stream_file(request: Request):
+    body = await request.json()
+    video_url = body.get("video_url")
     if not video_url:
         raise HTTPException(status_code=400, detail="No video URL provided.")
 
     file_id = str(uuid.uuid4())
-    file_extension = os.path.splitext(video_url)[1]
-    if not file_extension:
-        file_extension = ".mp4"
-
+    file_extension = os.path.splitext(video_url)[1] or ".mp4"
     temp_input_path = f"/tmp/{file_id}{file_extension}"
     output_dir = f"/tmp/{file_id}_hls"
 
@@ -86,16 +74,12 @@ async def stream_file(data: VideoUrl):
         convert_to_hls(temp_input_path, output_dir)
 
     except httpx.HTTPStatusError as e:
-        print(f"HTTP error downloading video: {e.response.status_code} - {e.response.text}")
-        raise HTTPException(status_code=500, detail=f"Failed to download video: HTTP error {e.response.status_code}")
+        raise HTTPException(status_code=500, detail=f"HTTP error {e.response.status_code}")
     except httpx.RequestError as e:
-        print(f"Network error downloading video: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to download video: Network error - {e}")
+        raise HTTPException(status_code=500, detail=f"Network error: {e}")
     except RuntimeError as e:
-        print(f"Runtime error during HLS conversion: {e}")
         raise HTTPException(status_code=500, detail=str(e))
     except Exception as e:
-        print(f"Unexpected error: {e}")
         raise HTTPException(status_code=500, detail=f"Unexpected error: {e}")
     finally:
         if os.path.exists(temp_input_path):
@@ -115,22 +99,16 @@ async def upload_video(file: UploadFile = File(...)):
     try:
         with open(input_path, "wb") as f:
             shutil.copyfileobj(file.file, f)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to save uploaded file: {e}")
 
-    try:
         convert_to_hls(input_path, output_dir)
+
     except RuntimeError as e:
-        if os.path.exists(input_path):
-            os.remove(input_path)
-        if os.path.exists(output_dir):
-            shutil.rmtree(output_dir)
+        if os.path.exists(input_path): os.remove(input_path)
+        if os.path.exists(output_dir): shutil.rmtree(output_dir)
         raise HTTPException(status_code=500, detail=str(e))
     except Exception as e:
-        if os.path.exists(input_path):
-            os.remove(input_path)
-        if os.path.exists(output_dir):
-            shutil.rmtree(output_dir)
+        if os.path.exists(input_path): os.remove(input_path)
+        if os.path.exists(output_dir): shutil.rmtree(output_dir)
         raise HTTPException(status_code=500, detail=f"Unexpected error: {e}")
     finally:
         if os.path.exists(input_path):
