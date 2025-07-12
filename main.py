@@ -7,27 +7,31 @@ from fastapi import FastAPI, HTTPException, UploadFile, File
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
+# NEW/VERIFY: Import CORSMiddleware for CORS handling
+from fastapi.middleware.cors import CORSMiddleware
+
 app = FastAPI()
 
 # Mount static files from /tmp so clients can access the .m3u8 and .ts files
 app.mount("/static", StaticFiles(directory="/tmp"), name="static")
 
-# CORS setup (ensure this is configured correctly for your frontend's domain)
-from fastapi.middleware.cors import CORSMiddleware
-
+# VERIFY THIS CORS CONFIGURATION CAREFULLY
+# This middleware must be configured to allow your frontend's domain to access your backend.
 origins = [
-    "https://serenekeks.com",  # Your frontend domain
-    # Add other origins if needed, e.g., for local development
-    "http://localhost",
-    "http://localhost:8080",
+    "https://serenekeks.com",  # Explicitly allow your frontend domain
+    "http://localhost",        # For local development of your frontend (e.g., if you run PHP locally)
+    "http://localhost:8080",   # Another common local dev port
+    # Add any other domains from which your frontend might make requests to this backend.
+    # For example, if you access your Railway app directly for testing:
+    # "https://serenemovie-production.up.railway.app",
 ]
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=origins,
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_origins=origins,       # List of allowed origins
+    allow_credentials=True,      # Allow cookies, authorization headers, etc.
+    allow_methods=["*"],         # Allow all HTTP methods (GET, POST, PUT, DELETE, OPTIONS)
+    allow_headers=["*"],         # Allow all headers in the request
 )
 
 
@@ -67,7 +71,7 @@ def convert_to_hls(input_path: str, output_dir: str):
     return output_m3u8
 
 @app.post("/stream_file")
-async def stream_file(video_url: str): # CHANGED: Now expects video_url
+async def stream_file(video_url: str): # CHANGED: Now expects video_url (public URL)
     """
     Downloads a video file from a given URL and converts it to an HLS stream.
 
@@ -86,7 +90,7 @@ async def stream_file(video_url: str): # CHANGED: Now expects video_url
     # Extract file extension from the URL to use in the temp file
     file_extension = os.path.splitext(video_url)[1]
     if not file_extension:
-        file_extension = ".mp4" # Default if no extension found
+        file_extension = ".mp4" # Default if no extension found, for safety
 
     temp_input_path = f"/tmp/{file_id}{file_extension}"
     output_dir = f"/tmp/{file_id}_hls"
@@ -95,10 +99,13 @@ async def stream_file(video_url: str): # CHANGED: Now expects video_url
     print(f"Saving to temporary path: {temp_input_path}")
 
     try:
-        # Download the video file
+        # Download the video file using httpx
+        # Using async with for httpx.AsyncClient ensures proper session management
+        # follow_redirects=True to handle redirects from the source URL
+        # timeout=30.0 (seconds) to prevent indefinitely hanging downloads
         async with httpx.AsyncClient(follow_redirects=True, timeout=30.0) as client:
             response = await client.get(video_url)
-            response.raise_for_status() # Raise an exception for HTTP errors (4xx or 5xx)
+            response.raise_for_status() # Raise an exception for HTTP errors (4xx or 5xx responses)
 
             with open(temp_input_path, "wb") as f:
                 f.write(response.content)
@@ -109,22 +116,29 @@ async def stream_file(video_url: str): # CHANGED: Now expects video_url
         print("HLS conversion successful.")
 
     except httpx.HTTPStatusError as e:
+        # Catch specific HTTP errors during download (e.g., 404, 500 from source)
         print(f"HTTP error downloading video: {e.response.status_code} - {e.response.text}")
         raise HTTPException(status_code=500, detail=f"Failed to download video: HTTP error {e.response.status_code}")
     except httpx.RequestError as e:
+        # Catch network-related errors during download (e.g., connection refused, timeout)
         print(f"Network error downloading video: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to download video: Network error - {e}")
     except RuntimeError as e:
+        # Catch errors specifically raised by the convert_to_hls function
         print(f"Runtime error during HLS conversion: {e}")
         raise HTTPException(status_code=500, detail=str(e))
     except Exception as e:
+        # Catch any other unexpected errors
         print(f"An unexpected error occurred: {e}")
         raise HTTPException(status_code=500, detail=f"An unexpected error occurred: {e}")
     finally:
-        # Clean up the temporary downloaded file
+        # Ensure cleanup of the temporary downloaded file, regardless of success or failure
         if os.path.exists(temp_input_path):
             os.remove(temp_input_path)
             print(f"Cleaned up temporary downloaded file: {temp_input_path}")
+        # Note: The HLS output directory (/tmp/{file_id}_hls) is not cleaned here
+        # because the frontend needs to access its contents. Railway's ephemeral
+        # filesystem will clear it on container restart.
 
 
     # Return URL to HLS stream
@@ -133,22 +147,27 @@ async def stream_file(video_url: str): # CHANGED: Now expects video_url
         "playlist_url": f"/static/{file_id}_hls/stream.m3u8"
     }
 
-# Keep the /upload endpoint as is, as it handles direct file uploads
+# This endpoint handles direct file uploads and converts them to HLS.
+# It remains unchanged from previous iterations.
 @app.post("/upload")
-async def upload_video(file: UploadFile = File(...)):
+async def upload_video(file: UploadFile = File(...)): # UploadFile and File are properly imported
+    # Create unique temp file names
     file_id = str(uuid.uuid4())
     input_path = f"/tmp/{file_id}_{file.filename}"
     output_dir = f"/tmp/{file_id}_hls"
 
+    # Save uploaded file to disk
     try:
         with open(input_path, "wb") as f:
             shutil.copyfileobj(file.file, f)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to save uploaded file: {e}")
 
+    # Convert to HLS
     try:
         convert_to_hls(input_path, output_dir)
     except RuntimeError as e:
+        # Clean up if conversion fails
         if os.path.exists(input_path):
             os.remove(input_path)
         if os.path.exists(output_dir):
@@ -161,9 +180,12 @@ async def upload_video(file: UploadFile = File(...)):
             shutil.rmtree(output_dir)
         raise HTTPException(status_code=500, detail=f"An unexpected error occurred: {e}")
     finally:
+        # Clean up the original uploaded file after successful conversion
         if os.path.exists(input_path):
             os.remove(input_path)
 
+
+    # Return URL to HLS stream
     return {
         "message": "Conversion successful",
         "playlist_url": f"/static/{file_id}_hls/stream.m3u8"
