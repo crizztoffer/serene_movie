@@ -21,7 +21,7 @@ origins = [
 # 🟢 Ensure CORS middleware is added BEFORE mounting static files
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=origins,
+    allow_origins=["https://serenekeks.com"],  # <-- your frontend origin
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
