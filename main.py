@@ -1,76 +1,94 @@
-from flask import Flask, request, jsonify, send_from_directory, abort
-from flask_cors import CORS
-import subprocess
-import os
+from fastapi import FastAPI, Request, HTTPException
+from fastapi.responses import JSONResponse, FileResponse
+from fastapi.middleware.cors import CORSMiddleware
+from starlette.staticfiles import StaticFiles
 import uuid
+import os
+import subprocess
+import shutil
+import asyncio
 
-app = Flask(__name__)
-CORS(app, origins=["https://serenekeks.com"])  # Restrict origin to your frontend domain
+app = FastAPI()
 
-# Directory to save HLS output segments/playlists
-HLS_OUTPUT_DIR = "hls_streams"
-os.makedirs(HLS_OUTPUT_DIR, exist_ok=True)
+# Enable CORS for all origins (adjust in production)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_headers=["*"],
+)
 
-@app.route('/stream_file', methods=['POST', 'OPTIONS'])
-def stream_file():
-    if request.method == 'OPTIONS':
-        # Preflight CORS response
-        return '', 204
+TMP_BASE = "/tmp/hls_streams"
+os.makedirs(TMP_BASE, exist_ok=True)
 
-    data = request.get_json()
-    if not data or 'video_url' not in data:
-        return jsonify({"error": "Missing 'video_url' in request body"}), 400
+# Serve static HLS files for each session id
+@app.get("/stream/{session_id}/{filename}")
+async def stream_file(session_id: str, filename: str):
+    dir_path = os.path.join(TMP_BASE, session_id)
+    file_path = os.path.join(dir_path, filename)
+    if not os.path.isfile(file_path):
+        raise HTTPException(404, "File not found")
+    return FileResponse(file_path, headers={
+        "Access-Control-Allow-Origin": "*",
+    })
 
-    video_url = data['video_url']
-    print(f"Received video_url to stream: {video_url}")
+@app.options("/convert")
+async def options_convert():
+    # Reply to CORS preflight
+    return JSONResponse(status_code=200, content={})
 
-    # Generate a unique ID for this stream session
-    stream_id = str(uuid.uuid4())
-    stream_dir = os.path.join(HLS_OUTPUT_DIR, stream_id)
-    os.makedirs(stream_dir, exist_ok=True)
+@app.post("/convert")
+async def convert(request: Request):
+    data = await request.json()
+    video_url = data.get("video_url")
+    if not video_url:
+        raise HTTPException(400, detail="Missing video_url")
 
-    # Output playlist filename
-    playlist_filename = "playlist.m3u8"
-    output_path = os.path.join(stream_dir, playlist_filename)
+    session_id = str(uuid.uuid4())
+    session_dir = os.path.join(TMP_BASE, session_id)
+    os.makedirs(session_dir, exist_ok=True)
 
-    # FFmpeg command to convert video URL to HLS segments/playlist
+    # Build ffmpeg command to create HLS stream in temp folder
     ffmpeg_cmd = [
         "ffmpeg",
-        "-y",  # overwrite output
-        "-i", video_url,  # input video URL
-        "-codec:", "copy",  # copy codecs (no re-encoding for speed, remove if incompatible)
-        "-start_number", "0",
-        "-hls_time", "10",  # 10-second segments
-        "-hls_list_size", "0",  # include all segments in playlist
+        "-y",
+        "-i", video_url,
+        "-c:v", "libx264",
+        "-preset", "veryfast",
+        "-crf", "23",
+        "-c:a", "aac",
+        "-b:a", "128k",
         "-f", "hls",
-        output_path
+        "-hls_time", "4",
+        "-hls_list_size", "5",
+        "-hls_flags", "delete_segments+temp_file",
+        os.path.join(session_dir, "index.m3u8"),
     ]
 
-    try:
-        # Run ffmpeg and wait for it to complete
-        print("Running ffmpeg command...")
-        result = subprocess.run(ffmpeg_cmd, capture_output=True, text=True, timeout=60)
-        if result.returncode != 0:
-            print("FFmpeg error:", result.stderr)
-            return jsonify({"error": "FFmpeg failed to process video"}), 500
-    except subprocess.TimeoutExpired:
-        return jsonify({"error": "FFmpeg timed out"}), 500
+    # Run ffmpeg in background, detached (no wait)
+    subprocess.Popen(ffmpeg_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
-    # Return relative playlist URL for client to play
-    playlist_url = f"/hls_streams/{stream_id}/{playlist_filename}"
-    print(f"Streaming ready: {playlist_url}")
-
-    return jsonify({"playlist_url": playlist_url})
+    playlist_url = f"/stream/{session_id}/index.m3u8"
+    return JSONResponse({"playlist_url": playlist_url})
 
 
-# Serve HLS stream files (playlist + ts segments)
-@app.route('/hls_streams/<stream_id>/<path:filename>')
-def serve_hls_files(stream_id, filename):
-    directory = os.path.join(HLS_OUTPUT_DIR, stream_id)
-    if not os.path.exists(os.path.join(directory, filename)):
-        abort(404)
-    return send_from_directory(directory, filename)
+# Optional cleanup task (not mandatory, but recommended)
+async def cleanup_old_sessions():
+    while True:
+        now = int(asyncio.get_event_loop().time())
+        for folder in os.listdir(TMP_BASE):
+            folder_path = os.path.join(TMP_BASE, folder)
+            if os.path.isdir(folder_path):
+                # Remove folders older than 1 hour (3600s)
+                try:
+                    mod_time = os.path.getmtime(folder_path)
+                    if (now - mod_time) > 3600:
+                        shutil.rmtree(folder_path)
+                        print(f"Deleted old session folder: {folder_path}")
+                except Exception as e:
+                    print(f"Error cleaning folder {folder_path}: {e}")
+        await asyncio.sleep(3600)  # Run cleanup every hour
 
-
-if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=8000)
+@app.on_event("startup")
+async def startup_event():
+    asyncio.create_task(cleanup_old_sessions())
